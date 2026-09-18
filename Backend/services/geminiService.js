@@ -1,6 +1,7 @@
 const { GoogleGenAI } = require("@google/genai");
 
 const DEFAULT_MODEL = "gemini-3.6-flash";
+const FALLBACK_MODEL = "gemini-3.5-flash";
 const MAX_TEXT_CHARS = 60000;
 const MAX_JD_CHARS = 20000;
 
@@ -11,6 +12,81 @@ const makeError = (message, statusCode) => {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+const MAX_GEMINI_ATTEMPTS = 3;
+const RETRY_DELAYS_MS = [500, 1200];
+const RETRYABLE_PHRASES =
+  /UNAVAILABLE|SERVICE_UNAVAILABLE|RESOURCE_EXHAUSTED|RATE_LIMIT|QUOTA|HIGH DEMAND|TEMPORARY|OVERLOADED/i;
+
+const parseGeminiErrorBody = (error) => {
+  let parsedBody = null;
+  try {
+    parsedBody = JSON.parse(
+      error && typeof error.message === "string" ? error.message : ""
+    );
+  } catch {
+    parsedBody = null;
+  }
+  const wrapper = parsedBody && parsedBody.error ? parsedBody.error : null;
+  const code =
+    (wrapper && wrapper.code != null ? wrapper.code : null) ||
+    (parsedBody && parsedBody.code != null ? parsedBody.code : null);
+  const text = [
+    error && error.message,
+    error && error.status,
+    error && error.code,
+    wrapper && wrapper.status,
+    parsedBody && parsedBody.status,
+  ]
+    .filter((value) => typeof value === "string")
+    .join(" ")
+    .toUpperCase();
+  return { code, text };
+};
+
+const isRetryableGeminiError = (error) => {
+  const { code, text } = parseGeminiErrorBody(error);
+  const rawStatus =
+    error && error.status != null ? Number(error.status) : code;
+  if (rawStatus != null && Number.isFinite(rawStatus)) {
+    if (RETRYABLE_STATUS_CODES.has(rawStatus)) return true;
+  }
+  return RETRYABLE_PHRASES.test(text);
+};
+
+const generateContentWithRetry = async (ai, request) => {
+  const models = [request.model];
+  if (request.model !== FALLBACK_MODEL) models.push(FALLBACK_MODEL);
+  let lastError = null;
+  for (let index = 0; index < models.length; index += 1) {
+    const modelName = models[index];
+    for (let attempt = 1; attempt <= MAX_GEMINI_ATTEMPTS; attempt += 1) {
+      try {
+        return await ai.models.generateContent({ ...request, model: modelName });
+      } catch (error) {
+        lastError = error;
+        if (!isRetryableGeminiError(error)) break;
+        if (attempt >= MAX_GEMINI_ATTEMPTS) break;
+        const delay = RETRY_DELAYS_MS[attempt - 1] || 1500;
+        console.error(
+          `Gemini request failed (attempt ${attempt}/${MAX_GEMINI_ATTEMPTS} on ${modelName}); retrying in ${delay}ms:`,
+          error.message
+        );
+        await sleep(delay);
+      }
+    }
+    if (!isRetryableGeminiError(lastError)) break;
+    if (index < models.length - 1) {
+      console.error(
+        `Gemini request on ${modelName} exhausted retries; switching to fallback model ${models[index + 1]}.`
+      );
+    }
+  }
+  throw lastError;
 };
 
 const buildAnalysisPrompt = (resumeText, truncated) => {
@@ -246,7 +322,7 @@ const analyzeResume = async (resumeText) => {
 
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await generateContentWithRetry(ai, {
       model,
       contents: buildAnalysisPrompt(textToSend, truncated),
       config: {
@@ -304,7 +380,7 @@ const analyzeJobDescription = async (description, title = "", company = "") => {
 
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await generateContentWithRetry(ai, {
       model,
       contents: buildJobDescriptionPrompt(
         textToSend,
@@ -458,7 +534,7 @@ const matchResumeWithJobDescription = async (resumeData, jobDescriptionData) => 
 
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await generateContentWithRetry(ai, {
       model,
       contents: buildMatchPrompt(
         { ...resumeData, text: textToSend },
@@ -646,7 +722,7 @@ const analyzeSkillGap = async (matchData, resumeData, jdData, knownNames) => {
 
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await generateContentWithRetry(ai, {
       model,
       contents: buildSkillGapPrompt(
         matchData,
@@ -822,7 +898,7 @@ const generateInterviewQuestions = async (
 
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await generateContentWithRetry(ai, {
       model,
       contents: buildInterviewQuestionsPrompt(
         resumeData,
@@ -995,7 +1071,7 @@ const evaluateMockInterview = async (data) => {
 
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await generateContentWithRetry(ai, {
       model,
       contents: buildEvaluationPrompt(data),
       config: {
@@ -1287,7 +1363,7 @@ const generateOptimizedResume = async (data) => {
 
   let response;
   try {
-    response = await ai.models.generateContent({
+    response = await generateContentWithRetry(ai, {
       model,
       contents: buildResumePrompt(data),
       config: {
