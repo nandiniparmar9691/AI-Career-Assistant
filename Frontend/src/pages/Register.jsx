@@ -52,7 +52,11 @@ const Register = () => {
         state: { message: 'Account created successfully. Please log in.' },
       })
     } catch (err) {
-      setError(getErrorMessage(err))
+      if (err.response?.status === 409) {
+        setError('User already exists. Please login.')
+      } else {
+        setError(getErrorMessage(err))
+      }
     } finally {
       setSubmitting(false)
     }
