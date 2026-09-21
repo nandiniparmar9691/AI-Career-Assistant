@@ -26,10 +26,24 @@ if (!process.env.JWT_SECRET) {
 
 const app = express();
 
-const clientURL = process.env.CLIENT_URL || "http://localhost:5173";
+const normalizeOrigin = (url) =>
+  url.trim().replace(/^CLIENT_URL=/i, "").replace(/\/+$/, "");
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  ...(process.env.CLIENT_URL || "").split(",").map(normalizeOrigin).filter(Boolean),
+];
+
 app.use(
   cors({
-    origin: clientURL,
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, origin);
+      } else {
+        callback(null, false);
+      }
+    },
     credentials: true,
     exposedHeaders: ["Content-Disposition"],
   })
